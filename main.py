@@ -627,4 +627,5 @@ with col2:
 
 st.markdown('<div class="info-box">', unsafe_allow_html=True)
 st.info("💡 **Tip:** Make sure your files are in the correct format (ZIP for reports, XLSX for promo data) before uploading.")
+
 st.markdown('</div>', unsafe_allow_html=True)
