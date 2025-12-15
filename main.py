@@ -74,282 +74,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def process_b2b_data(b2b_zip, pm_file, dyson_promo_file):
-    """Process B2B data and calculate support"""
-    try:
-        # Read B2B report from ZIP
-        with zipfile.ZipFile(b2b_zip) as z:
-            csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
-            with z.open(csv_name) as f:
-                b2b = pd.read_csv(f)
-        
-        # Read PM file and Dyson Promo file
-        PM = pd.read_excel(pm_file)
-        Dyson_Promo = pd.read_excel(dyson_promo_file)
-        
-        # Clean and prepare data
-        b2b["Asin"] = b2b["Asin"].astype(str).str.strip()
-        PM["ASIN"] = PM["ASIN"].astype(str).str.strip()
-        Dyson_Promo["ASIN"] = Dyson_Promo["ASIN"].astype(str).str.strip()
-        
-        # Map Brand from PM file
-        brand_map = PM.groupby("ASIN", as_index=True)["Brand"].first()
-        b2b["Brand"] = b2b["Asin"].map(brand_map)
-        
-        # Move Brand column after Sku if Sku exists
-        cols = list(b2b.columns)
-        if "Sku" in cols:
-            sku_idx = cols.index("Sku")
-            cols.remove("Brand")
-            cols.insert(sku_idx + 1, "Brand")
-            b2b = b2b[cols]
-        
-        # Filter Dyson brand - handle NaN values
-        dyson_b2b = b2b[b2b["Brand"].notna() & (b2b["Brand"].astype(str).str.strip().str.upper() == "DYSON")].copy()
-        
-        # Identify cancelled orders
-        cancel_data = dyson_b2b[
-            dyson_b2b["Transaction Type"].astype(str).str.strip().str.upper() == "CANCEL"
-        ]
-        cancel_order_set = set(cancel_data["Order Id"])
-        
-        # Add Order Status
-        dyson_b2b["Order Status"] = dyson_b2b["Order Id"].apply(
-            lambda x: x if x in cancel_order_set else np.nan
-        )
-        
-        # Move Order Status after Order Id
-        cols = list(dyson_b2b.columns)
-        order_idx = cols.index("Order Id")
-        cols.remove("Order Status")
-        cols.insert(order_idx + 1, "Order Status")
-        dyson_b2b = dyson_b2b[cols]
-        
-        # Replace NaN with Transaction Type
-        dyson_b2b["Order Status"] = np.where(
-            dyson_b2b["Order Status"].isna(),
-            dyson_b2b["Transaction Type"],
-            "Cancel"
-        )
-        
-        # Create pivot table
-        pivot_order_status = pd.pivot_table(
-            dyson_b2b,
-            index="Asin",
-            columns="Order Status",
-            values="Quantity",
-            aggfunc="sum",
-            fill_value=0,
-            margins=True,
-            margins_name="Grand Total"
-        )
-        
-        pivot_order_status_index = pivot_order_status.reset_index()
-        
-        # Calculate Net Sale
-        pivot_order_status_index["Net Sale / Actual Shipment"] = (
-            pivot_order_status_index.get("Shipment", 0) -
-            pivot_order_status_index.get("Refund", 0)
-        )
-        
-        # Map SKU, SSP, Cons Promo, Margin from Dyson_Promo file
-        sku_map = Dyson_Promo.groupby("ASIN", as_index=True)["SKU Code"].first()
-        ssp_map = Dyson_Promo.groupby("ASIN", as_index=True)["SSP"].first()
-        cons_map = Dyson_Promo.groupby("ASIN", as_index=True)["Cons Promo"].first()
-        margin_map = Dyson_Promo.groupby("ASIN", as_index=True)["Margin"].first()
-        
-        pivot_order_status_index["SKU CODE"] = pivot_order_status_index["Asin"].map(sku_map)
-        pivot_order_status_index["SSP"] = pivot_order_status_index["Asin"].map(ssp_map)
-        pivot_order_status_index["Cons Promo"] = pivot_order_status_index["Asin"].map(cons_map)
-        pivot_order_status_index["Margin %"] = (
-            pivot_order_status_index["Asin"].map(margin_map).mul(100)
-        )
-        
-        # Calculate Support
-        pivot_order_status_index["Support"] = (
-            (pivot_order_status_index["SSP"] - pivot_order_status_index["Cons Promo"])
-            * (1 - pivot_order_status_index["Margin %"] / 100)
-        )
-        
-        # Calculate Support as per Net Sale - NO WARNINGS
-        pivot_order_status_index["SUPPORT AS PER NET SALE"] = (
-            pd.to_numeric(pivot_order_status_index["Support"], errors='coerce').fillna(0)
-            * pd.to_numeric(pivot_order_status_index["Net Sale / Actual Shipment"], errors='coerce').fillna(0)
-        )
-        
-        # Fill NaN with 0 except for Grand Total row - NO WARNINGS
-        mask = pivot_order_status_index["Asin"] != "Grand Total"
-        for col in pivot_order_status_index.columns:
-            if col not in ["Asin", "SKU CODE", "Order Status"]:
-                pivot_order_status_index.loc[mask, col] = pd.to_numeric(
-                    pivot_order_status_index.loc[mask, col], errors='coerce'
-                ).fillna(0)
-        
-        # Recalculate Grand Total
-        df_no_gt = pivot_order_status_index[
-            pivot_order_status_index["Asin"] != "Grand Total"
-        ].copy()
-        
-        exclude_cols = ["Asin", "SKU CODE"]
-        cols_to_sum = [c for c in df_no_gt.columns if c not in exclude_cols]
-        
-        df_no_gt[cols_to_sum] = df_no_gt[cols_to_sum].apply(pd.to_numeric, errors="coerce")
-        
-        grand_total = df_no_gt[cols_to_sum].sum().to_frame().T
-        grand_total["Asin"] = "Grand Total"
-        grand_total["SKU CODE"] = ""
-        grand_total = grand_total[pivot_order_status_index.columns]
-        
-        pivot_order_status_index = pd.concat([df_no_gt, grand_total], ignore_index=True)
-        
-        # Convert SKU CODE to string to avoid Arrow serialization issues
-        pivot_order_status_index["SKU CODE"] = pivot_order_status_index["SKU CODE"].astype(str)
-        
-        return pivot_order_status_index
-        
-    except Exception as e:
-        st.error(f"Error processing B2B data: {str(e)}")
-        return None
-
-
-def process_b2c_data(b2c_zip, pm_file, dyson_promo_file):
-    """Process B2C data and calculate support"""
-    try:
-        # Read B2C report from ZIP
-        with zipfile.ZipFile(b2c_zip) as z:
-            csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
-            with z.open(csv_name) as f:
-                b2c = pd.read_csv(f)
-        
-        # Read PM file and Dyson Promo file
-        PM = pd.read_excel(pm_file)
-        Dyson_Promo = pd.read_excel(dyson_promo_file)
-        
-        # Clean and prepare data
-        b2c["Asin"] = b2c["Asin"].astype(str).str.strip()
-        PM["ASIN"] = PM["ASIN"].astype(str).str.strip()
-        Dyson_Promo["ASIN"] = Dyson_Promo["ASIN"].astype(str).str.strip()
-        
-        # Map Brand from PM file
-        brand_map = PM.groupby("ASIN", as_index=True)["Brand"].first()
-        b2c["Brand"] = b2c["Asin"].map(brand_map)
-        
-        # Move Brand column after Sku if Sku exists
-        cols = list(b2c.columns)
-        if "Sku" in cols:
-            sku_idx = cols.index("Sku")
-            cols.remove("Brand")
-            cols.insert(sku_idx + 1, "Brand")
-            b2c = b2c[cols]
-        
-        # Filter Dyson brand - handle NaN values
-        dyson_b2c = b2c[b2c["Brand"].notna() & (b2c["Brand"].astype(str).str.strip().str.upper() == "DYSON")].copy()
-        
-        # Identify cancelled orders
-        cancel_data = dyson_b2c[
-            dyson_b2c["Transaction Type"].astype(str).str.strip().str.upper() == "CANCEL"
-        ]
-        cancel_order_set = set(cancel_data["Order Id"])
-        
-        # Add Order Status
-        dyson_b2c["Order Status"] = dyson_b2c["Order Id"].apply(
-            lambda x: x if x in cancel_order_set else np.nan
-        )
-        
-        # Move Order Status after Order Id
-        cols = list(dyson_b2c.columns)
-        order_idx = cols.index("Order Id")
-        cols.remove("Order Status")
-        cols.insert(order_idx + 1, "Order Status")
-        dyson_b2c = dyson_b2c[cols]
-        
-        # Replace NaN with Transaction Type
-        dyson_b2c["Order Status"] = np.where(
-            dyson_b2c["Order Status"].isna(),
-            dyson_b2c["Transaction Type"],
-            "Cancel"
-        )
-        
-        # Create pivot table
-        pivot_order_status = pd.pivot_table(
-            dyson_b2c,
-            index="Asin",
-            columns="Order Status",
-            values="Quantity",
-            aggfunc="sum",
-            fill_value=0,
-            margins=True,
-            margins_name="Grand Total"
-        )
-        
-        pivot_order_status_index = pivot_order_status.reset_index()
-        
-        # Calculate Net Sale
-        pivot_order_status_index["Net Sale / Actual Shipment"] = (
-            pivot_order_status_index.get("Shipment", 0) -
-            pivot_order_status_index.get("Refund", 0)
-        )
-        
-        # Map SKU, SSP, Cons Promo, Margin from Dyson_Promo file
-        sku_map = Dyson_Promo.groupby("ASIN", as_index=True)["SKU Code"].first()
-        ssp_map = Dyson_Promo.groupby("ASIN", as_index=True)["SSP"].first()
-        cons_map = Dyson_Promo.groupby("ASIN", as_index=True)["Cons Promo"].first()
-        margin_map = Dyson_Promo.groupby("ASIN", as_index=True)["Margin"].first()
-        
-        pivot_order_status_index["SKU CODE"] = pivot_order_status_index["Asin"].map(sku_map)
-        pivot_order_status_index["SSP"] = pivot_order_status_index["Asin"].map(ssp_map)
-        pivot_order_status_index["Cons Promo"] = pivot_order_status_index["Asin"].map(cons_map)
-        pivot_order_status_index["Margin %"] = (
-            pivot_order_status_index["Asin"].map(margin_map).mul(100)
-        )
-        
-        # Calculate Support
-        pivot_order_status_index["Support"] = (
-            (pivot_order_status_index["SSP"] - pivot_order_status_index["Cons Promo"])
-            * (1 - pivot_order_status_index["Margin %"] / 100)
-        )
-        
-        # Calculate Support as per Net Sale - NO WARNINGS
-        pivot_order_status_index["SUPPORT AS PER NET SALE"] = (
-            pd.to_numeric(pivot_order_status_index["Support"], errors='coerce').fillna(0)
-            * pd.to_numeric(pivot_order_status_index["Net Sale / Actual Shipment"], errors='coerce').fillna(0)
-        )
-        
-        # Fill NaN with 0 except for Grand Total row - NO WARNINGS
-        mask = pivot_order_status_index["Asin"] != "Grand Total"
-        for col in pivot_order_status_index.columns:
-            if col not in ["Asin", "SKU CODE", "Order Status"]:
-                pivot_order_status_index.loc[mask, col] = pd.to_numeric(
-                    pivot_order_status_index.loc[mask, col], errors='coerce'
-                ).fillna(0)
-        
-        # Recalculate Grand Total
-        df_no_gt = pivot_order_status_index[
-            pivot_order_status_index["Asin"] != "Grand Total"
-        ].copy()
-        
-        exclude_cols = ["Asin", "SKU CODE"]
-        cols_to_sum = [c for c in df_no_gt.columns if c not in exclude_cols]
-        
-        df_no_gt[cols_to_sum] = df_no_gt[cols_to_sum].apply(pd.to_numeric, errors="coerce")
-        
-        grand_total = df_no_gt[cols_to_sum].sum().to_frame().T
-        grand_total["Asin"] = "Grand Total"
-        grand_total["SKU CODE"] = ""
-        grand_total = grand_total[pivot_order_status_index.columns]
-        
-        pivot_order_status_index = pd.concat([df_no_gt, grand_total], ignore_index=True)
-        
-        # Convert SKU CODE to string to avoid Arrow serialization issues
-        pivot_order_status_index["SKU CODE"] = pivot_order_status_index["SKU CODE"].astype(str)
-        
-        return pivot_order_status_index
-        
-    except Exception as e:
-        st.error(f"Error processing B2C data: {str(e)}")
-        return None
-
-
 def convert_df_to_csv(df):
     """Convert dataframe to CSV for download"""
     return df.to_csv(index=False).encode('utf-8')
@@ -362,238 +86,273 @@ def format_currency(value):
     return f"₹{value:,.0f}"
 
 
+def process_data(zip_file, pm_file, promo_file):
+    """Process B2B/B2C data and calculate support"""
+    try:
+        # ---------- READ FILES ----------
+        with zipfile.ZipFile(zip_file) as z:
+            csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
+            with z.open(csv_name) as f:
+                df = pd.read_csv(f)
+        
+        PM = pd.read_excel(pm_file)
+        Promo = pd.read_excel(promo_file)
+        
+        # Clean and prepare data
+        df["Asin"] = df["Asin"].astype(str).str.strip()
+        PM["ASIN"] = PM["ASIN"].astype(str).str.strip()
+        Promo["ASIN"] = Promo["ASIN"].astype(str).str.strip()
+        
+        # ---------- BRAND MAP ----------
+        brand_map = PM.groupby("ASIN", as_index=True)["Brand"].first()
+        df["Brand"] = df["Asin"].map(brand_map)
+        
+        # Move Brand column after Sku if Sku exists
+        cols = list(df.columns)
+        if "Sku" in cols:
+            sku_idx = cols.index("Sku")
+            cols.remove("Brand")
+            cols.insert(sku_idx + 1, "Brand")
+            df = df[cols]
+        
+        # ---------- DYSON ONLY ----------
+        dyson_df = df[df["Brand"].notna() & (df["Brand"].astype(str).str.strip().str.upper() == "DYSON")].copy()
+        
+        # ---------- ORDER STATUS ----------
+        cancel_orders = set(
+            dyson_df[dyson_df["Transaction Type"].astype(str).str.strip().str.upper() == "CANCEL"]["Order Id"]
+        )
+        
+        dyson_df["Order Status"] = np.where(
+            dyson_df["Order Id"].isin(cancel_orders),
+            "Cancel",
+            dyson_df["Transaction Type"]
+        )
+        
+        # Move Order Status after Order Id
+        cols = list(dyson_df.columns)
+        order_idx = cols.index("Order Id")
+        cols.remove("Order Status")
+        cols.insert(order_idx + 1, "Order Status")
+        dyson_df = dyson_df[cols]
+        
+        # ---------- PROCESSED DATA (BEFORE PIVOT) ----------
+        processed_df = dyson_df.copy()
+        
+        # ---------- PIVOT ----------
+        pivot = pd.pivot_table(
+            dyson_df,
+            index="Asin",
+            columns="Order Status",
+            values="Quantity",
+            aggfunc="sum",
+            fill_value=0,
+            margins=False
+        ).reset_index()
+        
+        # ---------- NET SALE ----------
+        pivot["Net Sale / Actual Shipment"] = (
+            pivot.get("Shipment", 0) - pivot.get("Refund", 0)
+        )
+        
+        # ---------- PROMO MAP ----------
+        pivot["SKU CODE"] = pivot["Asin"].map(Promo.groupby("ASIN")["SKU Code"].first())
+        pivot["SSP"] = pivot["Asin"].map(Promo.groupby("ASIN")["SSP"].first())
+        pivot["Cons Promo"] = pivot["Asin"].map(Promo.groupby("ASIN")["Cons Promo"].first())
+        pivot["Margin %"] = pivot["Asin"].map(Promo.groupby("ASIN")["Margin"].first()) * 100
+        
+        # ---------- SUPPORT ----------
+        pivot["Support"] = (
+            (pivot["SSP"] - pivot["Cons Promo"])
+            * (1 - pivot["Margin %"] / 100)
+        )
+        
+        pivot["SUPPORT AS PER NET SALE"] = (
+            pivot["Support"].fillna(0)
+            * pivot["Net Sale / Actual Shipment"].fillna(0)
+        )
+        
+        # ---------- CLEAN NUMERIC ----------
+        pivot.replace("", np.nan, inplace=True)
+        
+        # Get all numeric columns (excluding Asin and SKU CODE)
+        exclude_cols = ["Asin", "SKU CODE"]
+        numeric_cols = [col for col in pivot.columns if col not in exclude_cols]
+        
+        for col in numeric_cols:
+            pivot[col] = pd.to_numeric(pivot[col], errors="coerce").fillna(0)
+        
+        # ---------- GRAND TOTAL ----------
+        grand_total = {}
+        for col in pivot.columns:
+            if col == "Asin":
+                grand_total[col] = "Grand Total"
+            elif col == "SKU CODE":
+                grand_total[col] = ""
+            elif col in numeric_cols:
+                grand_total[col] = pivot[col].sum()
+            else:
+                grand_total[col] = 0
+        
+        pivot = pd.concat([pivot, pd.DataFrame([grand_total])], ignore_index=True)
+        
+        # Convert SKU CODE to string to avoid Arrow serialization issues
+        pivot["SKU CODE"] = pivot["SKU CODE"].astype(str)
+        
+        return pivot, processed_df
+        
+    except Exception as e:
+        st.error(f"Error processing data: {str(e)}")
+        return None, None
+
+
 # Main App
 tab1, tab2 = st.tabs(["📊 B2B Analysis", "📈 B2C Analysis"])
 
-# B2B Tab
-with tab1:
-    st.markdown("### B2B Support Calculation")
-    
-    st.info("📁 Please upload all three required files below:")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("**1️⃣ B2B Report**")
-        b2b_zip = st.file_uploader(
-            "Choose B2B ZIP file",
-            type=['zip'],
-            key='b2b_zip',
-            help="Upload b2bReport_October_2025.zip"
-        )
-        if b2b_zip:
-            st.success(f"✅ {b2b_zip.name}")
-    
-    with col2:
-        st.markdown("**2️⃣ PM File**")
-        b2b_pm = st.file_uploader(
-            "Choose PM Excel file",
-            type=['xlsx', 'xls'],
-            key='b2b_pm',
-            help="Upload PM.xlsx file"
-        )
-        if b2b_pm:
-            st.success(f"✅ {b2b_pm.name}")
-    
-    with col3:
-        st.markdown("**3️⃣ Dyson Promo**")
-        b2b_promo = st.file_uploader(
-            "Choose Dyson Promo file",
-            type=['xlsx', 'xls'],
-            key='b2b_promo',
-            help="Upload PromoCN Email.xlsx"
-        )
-        if b2b_promo:
-            st.success(f"✅ {b2b_promo.name}")
-    
-    if st.button("🔄 Calculate B2B Support", type="primary", use_container_width=True):
-        if b2b_zip and b2b_pm and b2b_promo:
-            with st.spinner("Processing B2B data..."):
-                result = process_b2b_data(b2b_zip, b2b_pm, b2b_promo)
-                
-                if result is not None:
-                    st.session_state['b2b_result'] = result
-                    st.markdown('<div class="success-box">✅ B2B data processed successfully!</div>', unsafe_allow_html=True)
-        else:
-            st.warning("⚠️ Please upload all three files to proceed.")
-    
-    # Display results
-    if 'b2b_result' in st.session_state:
-        result = st.session_state['b2b_result']
-        
-        # Key Metrics
-        grand_total = result[result['Asin'] == 'Grand Total'].iloc[0]
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Shipments", f"{int(grand_total.get('Shipment', 0)):,}")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Net Sales", f"{int(grand_total.get('Net Sale / Actual Shipment', 0)):,}")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Cancels", f"{int(grand_total.get('Cancel', 0)):,}")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col4:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            support_total = grand_total.get('SUPPORT AS PER NET SALE', 0)
-            st.metric("Total Support", format_currency(support_total))
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        # Data table
-        st.markdown("### Detailed Results")
-        
-        # Format numeric columns for display
-        display_df = result.copy()
-        numeric_cols = ['SSP', 'Cons Promo', 'Support', 'SUPPORT AS PER NET SALE']
-        for col in numeric_cols:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(lambda x: format_currency(x) if pd.notna(x) else '-')
-        
-        # Highlight Grand Total row
-        def highlight_grand_total(row):
-            if row['Asin'] == 'Grand Total':
-                return ['background-color: #dbeafe; font-weight: bold'] * len(row)
-            return [''] * len(row)
-        
-        st.dataframe(
-            display_df.style.apply(highlight_grand_total, axis=1),
-            use_container_width=True,
-            height=400
-        )
-        
-        # Download button
-        csv = convert_df_to_csv(result)
-        st.download_button(
-            label="📥 Download B2B Results as CSV",
-            data=csv,
-            file_name="b2b_support_analysis.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
 
-# B2C Tab
-with tab2:
-    st.markdown("### B2C Support Calculation")
-    
-    st.info("📁 Please upload all three required files below:")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("**1️⃣ B2C Report**")
-        b2c_zip = st.file_uploader(
-            "Choose B2C ZIP file",
-            type=['zip'],
-            key='b2c_zip',
-            help="Upload b2cReport_October_2025.zip"
-        )
-        if b2c_zip:
-            st.success(f"✅ {b2c_zip.name}")
-    
-    with col2:
-        st.markdown("**2️⃣ PM File**")
-        b2c_pm = st.file_uploader(
-            "Choose PM Excel file",
-            type=['xlsx', 'xls'],
-            key='b2c_pm',
-            help="Upload PM.xlsx file"
-        )
-        if b2c_pm:
-            st.success(f"✅ {b2c_pm.name}")
-    
-    with col3:
-        st.markdown("**3️⃣ Dyson Promo**")
-        b2c_promo = st.file_uploader(
-            "Choose Dyson Promo file",
-            type=['xlsx', 'xls'],
-            key='b2c_promo',
-            help="Upload PromoCN Email.xlsx"
-        )
-        if b2c_promo:
-            st.success(f"✅ {b2c_promo.name}")
-    
-    if st.button("🔄 Calculate B2C Support", type="primary", use_container_width=True):
-        if b2c_zip and b2c_pm and b2c_promo:
-            with st.spinner("Processing B2C data..."):
-                result = process_b2c_data(b2c_zip, b2c_pm, b2c_promo)
-                
-                if result is not None:
-                    st.session_state['b2c_result'] = result
-                    st.markdown('<div class="success-box">✅ B2C data processed successfully!</div>', unsafe_allow_html=True)
-        else:
-            st.warning("⚠️ Please upload all three files to proceed.")
-    
-    # Display results
-    if 'b2c_result' in st.session_state:
-        result = st.session_state['b2c_result']
+def render_tab(tab, key):
+    """Render B2B or B2C tab"""
+    with tab:
+        st.markdown(f"### {key} Support Calculation")
         
-        # Key Metrics
-        grand_total = result[result['Asin'] == 'Grand Total'].iloc[0]
+        st.info("📁 Please upload all three required files below:")
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
+        
         with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Shipments", f"{int(grand_total.get('Shipment', 0)):,}")
-            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("**1️⃣ Report ZIP**")
+            zip_file = st.file_uploader(
+                f"Choose {key} ZIP file",
+                type=['zip'],
+                key=f'{key}_zip',
+                help=f"Upload {key.lower()}Report_October_2025.zip"
+            )
+            if zip_file:
+                st.success(f"✅ {zip_file.name}")
         
         with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Net Sales", f"{int(grand_total.get('Net Sale / Actual Shipment', 0)):,}")
-            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("**2️⃣ PM File**")
+            pm_file = st.file_uploader(
+                "Choose PM Excel file",
+                type=['xlsx', 'xls'],
+                key=f'{key}_pm',
+                help="Upload PM.xlsx file"
+            )
+            if pm_file:
+                st.success(f"✅ {pm_file.name}")
         
         with col3:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Total Refunds", f"{int(grand_total.get('Refund', 0)):,}")
-            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("**3️⃣ Dyson Promo**")
+            promo_file = st.file_uploader(
+                "Choose Dyson Promo file",
+                type=['xlsx', 'xls'],
+                key=f'{key}_promo',
+                help="Upload PromoCN Email.xlsx"
+            )
+            if promo_file:
+                st.success(f"✅ {promo_file.name}")
         
-        with col4:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            support_total = grand_total.get('SUPPORT AS PER NET SALE', 0)
-            st.metric("Total Support", format_currency(support_total))
-            st.markdown('</div>', unsafe_allow_html=True)
+        if st.button(f"🔄 Calculate {key} Support", type="primary", use_container_width=True):
+            if zip_file and pm_file and promo_file:
+                with st.spinner(f"Processing {key} data..."):
+                    pivot, processed = process_data(zip_file, pm_file, promo_file)
+                    
+                    if pivot is not None and processed is not None:
+                        st.session_state[f'{key}_pivot'] = pivot
+                        st.session_state[f'{key}_processed'] = processed
+                        st.markdown(f'<div class="success-box">✅ {key} data processed successfully!</div>', unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ Please upload all three files to proceed.")
         
-        st.markdown("---")
+        # -------- PROCESSED DATA --------
+        if f'{key}_processed' in st.session_state:
+            st.markdown("---")
+            st.markdown("### 🧾 Processed Dyson Data (Before Pivot)")
+            st.dataframe(
+                st.session_state[f'{key}_processed'],
+                height=350,
+                use_container_width=True
+            )
+            
+            csv = convert_df_to_csv(st.session_state[f'{key}_processed'])
+            st.download_button(
+                label="📥 Download Processed Data (Before Pivot)",
+                data=csv,
+                file_name=f"{key.lower()}_processed_before_pivot.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            st.markdown("---")
         
-        # Data table
-        st.markdown("### Detailed Results")
-        
-        # Format numeric columns for display
-        display_df = result.copy()
-        numeric_cols = ['SSP', 'Cons Promo', 'Support', 'SUPPORT AS PER NET SALE']
-        for col in numeric_cols:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(lambda x: format_currency(x) if pd.notna(x) else '-')
-        
-        # Highlight Grand Total row
-        def highlight_grand_total(row):
-            if row['Asin'] == 'Grand Total':
-                return ['background-color: #dbeafe; font-weight: bold'] * len(row)
-            return [''] * len(row)
-        
-        st.dataframe(
-            display_df.style.apply(highlight_grand_total, axis=1),
-            use_container_width=True,
-            height=400
-        )
-        
-        # Download button
-        csv = convert_df_to_csv(result)
-        st.download_button(
-            label="📥 Download B2C Results as CSV",
-            data=csv,
-            file_name="b2c_support_analysis.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        # -------- FINAL RESULT --------
+        if f'{key}_pivot' in st.session_state:
+            result = st.session_state[f'{key}_pivot']
+            
+            # Key Metrics
+            grand_total = result[result['Asin'] == 'Grand Total'].iloc[0]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("Total Shipments", f"{int(grand_total.get('Shipment', 0)):,}")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.metric("Net Sales", f"{int(grand_total.get('Net Sale / Actual Shipment', 0)):,}")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                metric_label = "Total Cancels" if key == "B2B" else "Total Refunds"
+                metric_value = grand_total.get('Cancel', 0) if key == "B2B" else grand_total.get('Refund', 0)
+                st.metric(metric_label, f"{int(metric_value):,}")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col4:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                support_total = grand_total.get('SUPPORT AS PER NET SALE', 0)
+                st.metric("Total Support", format_currency(support_total))
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # Data table
+            st.markdown("### 📊 Final Support Calculation")
+            
+            # Format numeric columns for display
+            display_df = result.copy()
+            numeric_cols = ['SSP', 'Cons Promo', 'Support', 'SUPPORT AS PER NET SALE']
+            for col in numeric_cols:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].apply(lambda x: format_currency(x) if pd.notna(x) else '-')
+            
+            # Highlight Grand Total row
+            def highlight_grand_total(row):
+                if row['Asin'] == 'Grand Total':
+                    return ['background-color: #dbeafe; font-weight: bold'] * len(row)
+                return [''] * len(row)
+            
+            st.dataframe(
+                display_df.style.apply(highlight_grand_total, axis=1),
+                use_container_width=True,
+                height=400
+            )
+            
+            # Download button
+            csv = convert_df_to_csv(result)
+            st.download_button(
+                label=f"📥 Download {key} Final Results as CSV",
+                data=csv,
+                file_name=f"{key.lower()}_final_support_analysis.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+
+# Render both tabs
+render_tab(tab1, "B2B")
+render_tab(tab2, "B2C")
 
 # Footer with instructions
 st.markdown("---")
@@ -609,7 +368,8 @@ with col1:
     3. Upload the PM Excel file
     4. Upload the Dyson Promo Excel file (Dyson Promo file header should be in same format if there is error while uploading file please check header of Dyson Promo file)
     5. Click the **Calculate** button
-    6. View results and download CSV
+    6. View processed data (before pivot) and final results
+    7. Download CSV files as needed
     """)
 
 with col2:
@@ -627,5 +387,4 @@ with col2:
 
 st.markdown('<div class="info-box">', unsafe_allow_html=True)
 st.info("💡 **Tip:** Make sure your files are in the correct format (ZIP for reports, XLSX for promo data) before uploading.")
-
 st.markdown('</div>', unsafe_allow_html=True)
