@@ -1,3 +1,4 @@
+# old code in main.py in folder use that if you need 
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -86,15 +87,22 @@ def format_currency(value):
     return f"₹{value:,.0f}"
 
 
-def process_data(zip_file, pm_file, promo_file):
+def process_data(zip_files, pm_file, promo_file):
     """Process B2B/B2C data and calculate support"""
     try:
         # ---------- READ FILES ----------
-        with zipfile.ZipFile(zip_file) as z:
-            csv_name = [name for name in z.namelist() if name.endswith('.csv')][0]
-            with z.open(csv_name) as f:
-                df = pd.read_csv(f)
-        
+        all_dfs = []
+        for zip_file in zip_files:
+            with zipfile.ZipFile(zip_file) as z:
+                csv_files = [name for name in z.namelist() if name.endswith('.csv')]
+
+                for csv_name in csv_files:
+                    with z.open(csv_name) as f:
+                        temp_df = pd.read_csv(f)
+                        all_dfs.append(temp_df)
+
+        df = pd.concat(all_dfs, ignore_index=True)
+
         PM = pd.read_excel(pm_file)
         Promo = pd.read_excel(promo_file)
         
@@ -221,14 +229,16 @@ def render_tab(tab, key):
         
         with col1:
             st.markdown("**1️⃣ Report ZIP**")
-            zip_file = st.file_uploader(
-                f"Choose {key} ZIP file",
+            zip_files = st.file_uploader(
+                f"Choose {key} ZIP files (Multiple allowed)",
                 type=['zip'],
+                accept_multiple_files=True,
                 key=f'{key}_zip',
-                help=f"Upload {key.lower()}Report_October_2025.zip"
+                help=f"Upload one or more {key.lower()} report ZIP files"
             )
-            if zip_file:
-                st.success(f"✅ {zip_file.name}")
+            if zip_files:
+                st.success(f"✅ {len(zip_files)} ZIP file(s) uploaded ")
+
         
         with col2:
             st.markdown("**2️⃣ PM File**")
@@ -253,9 +263,9 @@ def render_tab(tab, key):
                 st.success(f"✅ {promo_file.name}")
         
         if st.button(f"🔄 Calculate {key} Support", type="primary", use_container_width=True):
-            if zip_file and pm_file and promo_file:
+            if zip_files and pm_file and promo_file:
                 with st.spinner(f"Processing {key} data..."):
-                    pivot, processed = process_data(zip_file, pm_file, promo_file)
+                    pivot, processed = process_data(zip_files, pm_file, promo_file)
                     
                     if pivot is not None and processed is not None:
                         st.session_state[f'{key}_pivot'] = pivot
