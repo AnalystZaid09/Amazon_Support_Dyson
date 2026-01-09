@@ -215,64 +215,81 @@ def process_data(zip_files, pm_file, promo_file):
 
 
 # Main App
-tab1, tab2 = st.tabs(["📊 B2B Analysis", "📈 B2C Analysis"])
+tab1, tab2, tab3 = st.tabs(["📊 B2B Analysis", "📈 B2C Analysis", "🔄 Combined Analysis"])
 
 
 def render_tab(tab, key):
-    """Render B2B or B2C tab"""
+    """Render B2B, B2C or Combined tab"""
     with tab:
         st.markdown(f"### {key} Support Calculation")
         
-        st.info("📁 Please upload all three required files below:")
+        st.info("📁 Please upload required files below:")
         
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("**1️⃣ Report ZIP**")
-            zip_files = st.file_uploader(
-                f"Choose {key} ZIP files (Multiple allowed)",
-                type=['zip'],
-                accept_multiple_files=True,
-                key=f'{key}_zip',
-                help=f"Upload one or more {key.lower()} report ZIP files"
-            )
-            if zip_files:
-                st.success(f"✅ {len(zip_files)} ZIP file(s) uploaded ")
-
-        
-        with col2:
-            st.markdown("**2️⃣ PM File**")
-            pm_file = st.file_uploader(
-                "Choose PM Excel file",
-                type=['xlsx', 'xls'],
-                key=f'{key}_pm',
-                help="Upload PM.xlsx file"
-            )
-            if pm_file:
-                st.success(f"✅ {pm_file.name}")
-        
-        with col3:
-            st.markdown("**3️⃣ Dyson Promo**")
-            promo_file = st.file_uploader(
-                "Choose Dyson Promo file",
-                type=['xlsx', 'xls'],
-                key=f'{key}_promo',
-                help="Upload PromoCN Email.xlsx"
-            )
-            if promo_file:
-                st.success(f"✅ {promo_file.name}")
-        
-        if st.button(f"🔄 Calculate {key} Support", type="primary", use_container_width=True):
-            if zip_files and pm_file and promo_file:
-                with st.spinner(f"Processing {key} data..."):
-                    pivot, processed = process_data(zip_files, pm_file, promo_file)
-                    
-                    if pivot is not None and processed is not None:
-                        st.session_state[f'{key}_pivot'] = pivot
-                        st.session_state[f'{key}_processed'] = processed
-                        st.markdown(f'<div class="success-box">✅ {key} data processed successfully!</div>', unsafe_allow_html=True)
-            else:
-                st.warning("⚠️ Please upload all three files to proceed.")
+        if key == "Combined":
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**1️⃣ B2B Report ZIP**")
+                b2b_zip = st.file_uploader(
+                    "Choose B2B ZIP files",
+                    type=['zip'],
+                    accept_multiple_files=True,
+                    key='combined_b2b_zip'
+                )
+            with col2:
+                st.markdown("**2️⃣ B2C Report ZIP**")
+                b2c_zip = st.file_uploader(
+                    "Choose B2C ZIP files",
+                    type=['zip'],
+                    accept_multiple_files=True,
+                    key='combined_b2c_zip'
+                )
+            
+            col_pm, col_promo = st.columns(2)
+            with col_pm:
+                st.markdown("**3️⃣ PM File**")
+                pm_file = st.file_uploader("Choose PM Excel file", type=['xlsx', 'xls'], key='combined_pm')
+            with col_promo:
+                st.markdown("**4️⃣ Dyson Promo**")
+                promo_file = st.file_uploader("Choose Dyson Promo file", type=['xlsx', 'xls'], key='combined_promo')
+            
+            if st.button("🔄 Calculate Combined Support", type="primary", use_container_width=True):
+                if (b2b_zip or b2c_zip) and pm_file and promo_file:
+                    all_zips = (b2b_zip if b2b_zip else []) + (b2c_zip if b2c_zip else [])
+                    with st.spinner("Processing combined data..."):
+                        pivot, processed = process_data(all_zips, pm_file, promo_file)
+                        if pivot is not None:
+                            st.session_state[f'{key}_pivot'] = pivot
+                            st.session_state[f'{key}_processed'] = processed
+                            st.success("✅ Combined data processed successfully!")
+                else:
+                    st.warning("⚠️ Please upload at least one report ZIP and both PM/Promo files.")
+        else:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("**1️⃣ Report ZIP**")
+                zip_files = st.file_uploader(
+                    f"Choose {key} ZIP files",
+                    type=['zip'],
+                    accept_multiple_files=True,
+                    key=f'{key}_zip'
+                )
+            with col2:
+                st.markdown("**2️⃣ PM File**")
+                pm_file = st.file_uploader("Choose PM Excel file", type=['xlsx', 'xls'], key=f'{key}_pm')
+            with col3:
+                st.markdown("**3️⃣ Dyson Promo**")
+                promo_file = st.file_uploader("Choose Dyson Promo file", type=['xlsx', 'xls'], key=f'{key}_promo')
+            
+            if st.button(f"🔄 Calculate {key} Support", type="primary", use_container_width=True):
+                if zip_files and pm_file and promo_file:
+                    with st.spinner(f"Processing {key} data..."):
+                        pivot, processed = process_data(zip_files, pm_file, promo_file)
+                        if pivot is not None:
+                            st.session_state[f'{key}_pivot'] = pivot
+                            st.session_state[f'{key}_processed'] = processed
+                            st.success(f"✅ {key} data processed successfully!")
+                else:
+                    st.warning("⚠️ Please upload all three files to proceed.")
         
         # -------- PROCESSED DATA --------
         if f'{key}_processed' in st.session_state:
@@ -360,9 +377,10 @@ def render_tab(tab, key):
             )
 
 
-# Render both tabs
+# Render tabs
 render_tab(tab1, "B2B")
 render_tab(tab2, "B2C")
+render_tab(tab3, "Combined")
 
 # Footer with instructions
 st.markdown("---")
