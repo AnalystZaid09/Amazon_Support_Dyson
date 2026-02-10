@@ -1,4 +1,3 @@
-# old code in main.py in folder use that if you need 
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -87,7 +86,8 @@ def format_currency(value):
     return f"₹{value:,.0f}"
 
 
-def process_data(zip_files, pm_file, promo_file):
+
+def process_data(zip_files, pm_file, promo_file, target_month, target_year):
     """Process B2B/B2C data and calculate support"""
     try:
         # ---------- READ FILES ----------
@@ -125,6 +125,21 @@ def process_data(zip_files, pm_file, promo_file):
         
         # ---------- DYSON ONLY ----------
         dyson_df = df[df["Brand"].notna() & (df["Brand"].astype(str).str.strip().str.upper() == "DYSON")].copy()
+        
+        # ---------- REFUND ONLY ----------
+        dyson_df = dyson_df[dyson_df["Transaction Type"].astype(str).str.strip().str.upper() == "REFUND"].copy()
+        
+        # ---------- DATE FILTER ----------
+        dyson_df["Order Date"] = pd.to_datetime(dyson_df["Order Date"], errors='coerce')
+        month_map = {
+            "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+            "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12
+        }
+        target_month_num = month_map[target_month]
+        dyson_df = dyson_df[
+            (dyson_df["Order Date"].dt.month == target_month_num) &
+            (dyson_df["Order Date"].dt.year == target_year)
+        ].copy()
         
         # ---------- ORDER STATUS ----------
         cancel_orders = set(
@@ -225,6 +240,25 @@ def render_tab(tab, key):
         
         st.info("📁 Please upload required files below:")
         
+        # Month and Year selection for all tabs
+        st.markdown("**📅 Select Analysis Period**")
+        m_col, y_col = st.columns(2)
+        with m_col:
+            t_month = st.selectbox(
+                f"Month ({key})",
+                ["January", "February", "March", "April", "May", "June", 
+                 "July", "August", "September", "October", "November", "December"],
+                index=9,
+                key=f'month_{key}'
+            )
+        with y_col:
+            t_year = st.selectbox(
+                f"Year ({key})",
+                [2024, 2025, 2026],
+                index=1,
+                key=f'year_{key}'
+            )
+        
         if key == "Combined":
             col1, col2 = st.columns(2)
             with col1:
@@ -255,8 +289,8 @@ def render_tab(tab, key):
             if st.button("🔄 Calculate Combined Support", type="primary", use_container_width=True):
                 if (b2b_zip or b2c_zip) and pm_file and promo_file:
                     all_zips = (b2b_zip if b2b_zip else []) + (b2c_zip if b2c_zip else [])
-                    with st.spinner("Processing combined data..."):
-                        pivot, processed = process_data(all_zips, pm_file, promo_file)
+                    with st.spinner(f"Processing combined data for {t_month} {t_year}..."):
+                        pivot, processed = process_data(all_zips, pm_file, promo_file, t_month, t_year)
                         if pivot is not None:
                             st.session_state[f'{key}_pivot'] = pivot
                             st.session_state[f'{key}_processed'] = processed
@@ -282,8 +316,8 @@ def render_tab(tab, key):
             
             if st.button(f"🔄 Calculate {key} Support", type="primary", use_container_width=True):
                 if zip_files and pm_file and promo_file:
-                    with st.spinner(f"Processing {key} data..."):
-                        pivot, processed = process_data(zip_files, pm_file, promo_file)
+                    with st.spinner(f"Processing {key} data for {t_month} {t_year}..."):
+                        pivot, processed = process_data(zip_files, pm_file, promo_file, t_month, t_year)
                         if pivot is not None:
                             st.session_state[f'{key}_pivot'] = pivot
                             st.session_state[f'{key}_processed'] = processed
@@ -391,13 +425,12 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown("""
     **Steps:**
-    1. Select either **B2B** or **B2C** tab
-    2. Upload the report ZIP file
-    3. Upload the PM Excel file
-    4. Upload the Dyson Promo Excel file (Dyson Promo file header should be in same format if there is error while uploading file please check header of Dyson Promo file)
-    5. Click the **Calculate** button
-    6. View processed data (before pivot) and final results
-    7. Download CSV files as needed
+    1. **Analysis Tabs**: Select **B2B**, **B2C**, or **Combined** for support calculations.
+    2. **Upload Reports**: Provide the report ZIP file(s).
+    3. **PM File Step**: Upload `PM.xlsx` to map the **Brand** column to the data.
+    4. **Transaction Type**: The tool filters for **Dyson Brand**, **Refund** transactions, and **Selected Period** automatically.
+    5. **Analysis Step**: Upload `PromoCN Email.xlsx` for support calculations.
+    6. Click **Calculate** and download results.
     """)
 
 with col2:
