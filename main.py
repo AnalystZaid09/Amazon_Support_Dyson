@@ -437,7 +437,7 @@ with col2:
     st.markdown("""
     **Required Files:**
     - **B2B/B2C Report**: ZIP file with CSV data
-    - **PM.xlsx**: Product Master file
+    - **PM.xlsx**: Purchase Master file
     - **PromoCN Email.xlsx**: Dyson Promo data
     
     **Key Calculations:**
@@ -449,3 +449,4 @@ with col2:
 st.markdown('<div class="info-box">', unsafe_allow_html=True)
 st.info("💡 **Tip:** Make sure your files are in the correct format (ZIP for reports, XLSX for promo data) before uploading.")
 st.markdown('</div>', unsafe_allow_html=True)
+
