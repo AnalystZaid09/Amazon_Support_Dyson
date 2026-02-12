@@ -1,3 +1,4 @@
+# this old code that is replace on 10/feb/2026
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -85,9 +86,33 @@ def format_currency(value):
         return "-"
     return f"₹{value:,.0f}"
 
+def get_available_months(zip_files):
+    """Scan ZIP files and return unique months found in Invoice Date column"""
+    month_names = {
+        1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
+        7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December"
+    }
+    found_months = set()
+    try:
+        for zip_file in zip_files:
+            with zipfile.ZipFile(zip_file) as z:
+                csv_files = [name for name in z.namelist() if name.endswith('.csv')]
+                for csv_name in csv_files:
+                    with z.open(csv_name) as f:
+                        temp_df = pd.read_csv(f, usecols=["Invoice Date"])
+                        dates = pd.to_datetime(temp_df["Invoice Date"], errors='coerce')
+                        for m in dates.dt.month.dropna().unique():
+                            found_months.add(month_names[int(m)])
+            zip_file.seek(0)  # Reset file pointer so it can be read again by process_data
+    except Exception:
+        pass
+    # Return in calendar order
+    ordered = ["January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November", "December"]
+    return [m for m in ordered if m in found_months]
 
 
-def process_data(zip_files, pm_file, promo_file, target_month, target_year):
+def process_data(zip_files, pm_file, promo_file, past_months):
     """Process B2B/B2C data and calculate support"""
     try:
         # ---------- READ FILES ----------
@@ -103,43 +128,47 @@ def process_data(zip_files, pm_file, promo_file, target_month, target_year):
 
         df = pd.concat(all_dfs, ignore_index=True)
 
+        # Clean and prepare data
+        df["Sku"] = df["Sku"].astype(str).str.strip()
+        df["Asin"] = df["Asin"].astype(str).str.strip()
         PM = pd.read_excel(pm_file)
         Promo = pd.read_excel(promo_file)
-        
-        # Clean and prepare data
-        df["Asin"] = df["Asin"].astype(str).str.strip()
+        PM["Amazon Sku Name"] = PM["Amazon Sku Name"].astype(str).str.strip()
         PM["ASIN"] = PM["ASIN"].astype(str).str.strip()
         Promo["ASIN"] = Promo["ASIN"].astype(str).str.strip()
         
-        # ---------- BRAND MAP ----------
-        brand_map = PM.groupby("ASIN", as_index=True)["Brand"].first()
-        df["Brand"] = df["Asin"].map(brand_map)
+        # ---------- STEP 1: BRAND MAP via SKU ----------
+        brand_map_sku = PM.groupby("Amazon Sku Name", as_index=True)["Brand"].first()
+        df["Brand"] = df["Sku"].map(brand_map_sku)
         
-        # Move Brand column after Sku if Sku exists
+        # Move Brand column after Sku
         cols = list(df.columns)
-        if "Sku" in cols:
+        if "Sku" in cols and "Brand" in cols:
             sku_idx = cols.index("Sku")
             cols.remove("Brand")
             cols.insert(sku_idx + 1, "Brand")
             df = df[cols]
         
-        # ---------- DYSON ONLY ----------
-        dyson_df = df[df["Brand"].notna() & (df["Brand"].astype(str).str.strip().str.upper() == "DYSON")].copy()
-        
-        # ---------- REFUND ONLY ----------
-        dyson_df = dyson_df[dyson_df["Transaction Type"].astype(str).str.strip().str.upper() == "REFUND"].copy()
-        
-        # ---------- DATE FILTER ----------
-        dyson_df["Order Date"] = pd.to_datetime(dyson_df["Order Date"], errors='coerce')
+        # ---------- STEP 2: REMOVE SELECTED PAST-MONTH REFUNDS ----------
         month_map = {
             "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
             "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12
         }
-        target_month_num = month_map[target_month]
-        dyson_df = dyson_df[
-            (dyson_df["Order Date"].dt.month == target_month_num) &
-            (dyson_df["Order Date"].dt.year == target_year)
-        ].copy()
+        
+        # Parse Invoice Date
+        df["Invoice Date"] = pd.to_datetime(df["Invoice Date"], errors='coerce')
+        
+        # Remove refund rows from user-selected past months
+        if past_months:
+            selected_month_nums = [month_map[m] for m in past_months]
+            past_month_refund_mask = (
+                (df["Invoice Date"].dt.month.isin(selected_month_nums)) &
+                (df["Transaction Type"].astype(str).str.strip().str.upper() == "REFUND")
+            )
+            df = df[~past_month_refund_mask].copy()
+        
+        # ---------- DYSON ONLY ----------
+        dyson_df = df[df["Brand"].notna() & (df["Brand"].astype(str).str.strip().str.upper() == "DYSON")].copy()
         
         # ---------- ORDER STATUS ----------
         cancel_orders = set(
@@ -240,25 +269,6 @@ def render_tab(tab, key):
         
         st.info("📁 Please upload required files below:")
         
-        # Month and Year selection for all tabs
-        st.markdown("**📅 Select Analysis Period**")
-        m_col, y_col = st.columns(2)
-        with m_col:
-            t_month = st.selectbox(
-                f"Month ({key})",
-                ["January", "February", "March", "April", "May", "June", 
-                 "July", "August", "September", "October", "November", "December"],
-                index=9,
-                key=f'month_{key}'
-            )
-        with y_col:
-            t_year = st.selectbox(
-                f"Year ({key})",
-                [2024, 2025, 2026],
-                index=1,
-                key=f'year_{key}'
-            )
-        
         if key == "Combined":
             col1, col2 = st.columns(2)
             with col1:
@@ -286,17 +296,9 @@ def render_tab(tab, key):
                 st.markdown("**4️⃣ Dyson Promo**")
                 promo_file = st.file_uploader("Choose Dyson Promo file", type=['xlsx', 'xls'], key='combined_promo')
             
-            if st.button("🔄 Calculate Combined Support", type="primary", use_container_width=True):
-                if (b2b_zip or b2c_zip) and pm_file and promo_file:
-                    all_zips = (b2b_zip if b2b_zip else []) + (b2c_zip if b2c_zip else [])
-                    with st.spinner(f"Processing combined data for {t_month} {t_year}..."):
-                        pivot, processed = process_data(all_zips, pm_file, promo_file, t_month, t_year)
-                        if pivot is not None:
-                            st.session_state[f'{key}_pivot'] = pivot
-                            st.session_state[f'{key}_processed'] = processed
-                            st.success("✅ Combined data processed successfully!")
-                else:
-                    st.warning("⚠️ Please upload at least one report ZIP and both PM/Promo files.")
+            # Detect available months from uploaded ZIPs
+            all_zips_for_scan = (b2b_zip if b2b_zip else []) + (b2c_zip if b2c_zip else [])
+            available_months = get_available_months(all_zips_for_scan) if all_zips_for_scan else []
         else:
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -314,10 +316,39 @@ def render_tab(tab, key):
                 st.markdown("**3️⃣ Dyson Promo**")
                 promo_file = st.file_uploader("Choose Dyson Promo file", type=['xlsx', 'xls'], key=f'{key}_promo')
             
+            # Detect available months from uploaded ZIPs
+            available_months = get_available_months(zip_files) if zip_files else []
+        
+        # Show past months multiselect only if ZIP files are uploaded
+        if available_months:
+            past_months = st.multiselect(
+                f"Select past months to remove Refund data ({key})",
+                options=available_months,
+                default=[],
+                key=f'past_months_{key}',
+                help="These months were found in the Invoice Date column of your uploaded files. Select which ones to remove Refund data from."
+            )
+        else:
+            past_months = []
+        
+        # Calculate button
+        if key == "Combined":
+            if st.button("🔄 Calculate Combined Support", type="primary", use_container_width=True):
+                if (b2b_zip or b2c_zip) and pm_file and promo_file:
+                    all_zips = (b2b_zip if b2b_zip else []) + (b2c_zip if b2c_zip else [])
+                    with st.spinner("Processing combined data..."):
+                        pivot, processed = process_data(all_zips, pm_file, promo_file, past_months)
+                        if pivot is not None:
+                            st.session_state[f'{key}_pivot'] = pivot
+                            st.session_state[f'{key}_processed'] = processed
+                            st.success("✅ Combined data processed successfully!")
+                else:
+                    st.warning("⚠️ Please upload at least one report ZIP and both PM/Promo files.")
+        else:
             if st.button(f"🔄 Calculate {key} Support", type="primary", use_container_width=True):
                 if zip_files and pm_file and promo_file:
-                    with st.spinner(f"Processing {key} data for {t_month} {t_year}..."):
-                        pivot, processed = process_data(zip_files, pm_file, promo_file, t_month, t_year)
+                    with st.spinner(f"Processing {key} data..."):
+                        pivot, processed = process_data(zip_files, pm_file, promo_file, past_months)
                         if pivot is not None:
                             st.session_state[f'{key}_pivot'] = pivot
                             st.session_state[f'{key}_processed'] = processed
@@ -425,19 +456,20 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown("""
     **Steps:**
-    1. **Analysis Tabs**: Select **B2B**, **B2C**, or **Combined** for support calculations.
-    2. **Upload Reports**: Provide the report ZIP file(s).
-    3. **PM File Step**: Upload `PM.xlsx` to map the **Brand** column to the data.
-    4. **Transaction Type**: The tool filters for **Dyson Brand**, **Refund** transactions, and **Selected Period** automatically.
-    5. **Analysis Step**: Upload `PromoCN Email.xlsx` for support calculations.
-    6. Click **Calculate** and download results.
+    1. Select either **B2B** or **B2C** tab
+    2. Upload the report ZIP file
+    3. Upload the PM Excel file
+    4. Upload the Dyson Promo Excel file (Dyson Promo file header should be in same format if there is error while uploading file please check header of Dyson Promo file)
+    5. Click the **Calculate** button
+    6. View processed data (before pivot) and final results
+    7. Download CSV files as needed
     """)
 
 with col2:
     st.markdown("""
     **Required Files:**
     - **B2B/B2C Report**: ZIP file with CSV data
-    - **PM.xlsx**: Purchase Master file
+    - **PM.xlsx**: Product Master file
     - **PromoCN Email.xlsx**: Dyson Promo data
     
     **Key Calculations:**
@@ -449,4 +481,3 @@ with col2:
 st.markdown('<div class="info-box">', unsafe_allow_html=True)
 st.info("💡 **Tip:** Make sure your files are in the correct format (ZIP for reports, XLSX for promo data) before uploading.")
 st.markdown('</div>', unsafe_allow_html=True)
-
