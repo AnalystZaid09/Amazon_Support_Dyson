@@ -224,6 +224,9 @@ def process_data(zip_files, pm_file, promo_file, past_months):
             * pivot["Net Sale / Actual Shipment"].fillna(0)
         )
         
+        # ---------- BASE AMOUNT (EXCLUDING 18% GST) ----------
+        pivot["Base Amount"] = (pivot["SUPPORT AS PER NET SALE"] / 1.18).round(2)
+        
         # ---------- CLEAN NUMERIC ----------
         pivot.replace("", np.nan, inplace=True)
         
@@ -259,7 +262,12 @@ def process_data(zip_files, pm_file, promo_file, past_months):
 
 
 # Main App
-tab1, tab2, tab3 = st.tabs(["📊 B2B Analysis", "📈 B2C Analysis", "🔄 Combined Analysis"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 B2B Analysis", 
+    "📈 B2C Analysis", 
+    "🔄 Combined Analysis",
+    "🧾 Invoice Qty"
+])
 
 
 def render_tab(tab, key):
@@ -271,6 +279,7 @@ def render_tab(tab, key):
         
         if key == "Combined":
             col1, col2 = st.columns(2)
+            
             with col1:
                 st.markdown("**1️⃣ B2B Report ZIP**")
                 b2b_zip = st.file_uploader(
@@ -279,6 +288,7 @@ def render_tab(tab, key):
                     accept_multiple_files=True,
                     key='combined_b2b_zip'
                 )
+                
             with col2:
                 st.markdown("**2️⃣ B2C Report ZIP**")
                 b2c_zip = st.file_uploader(
@@ -309,9 +319,11 @@ def render_tab(tab, key):
                     accept_multiple_files=True,
                     key=f'{key}_zip'
                 )
+                
             with col2:
                 st.markdown("**2️⃣ PM File**")
                 pm_file = st.file_uploader("Choose PM Excel file", type=['xlsx', 'xls'], key=f'{key}_pm')
+                
             with col3:
                 st.markdown("**3️⃣ Dyson Promo**")
                 promo_file = st.file_uploader("Choose Dyson Promo file", type=['xlsx', 'xls'], key=f'{key}_promo')
@@ -414,7 +426,7 @@ def render_tab(tab, key):
             
             # Format numeric columns for display
             display_df = result.copy()
-            numeric_cols = ['SSP', 'Cons Promo', 'Support', 'SUPPORT AS PER NET SALE']
+            numeric_cols = ['SSP', 'Cons Promo', 'Support', 'SUPPORT AS PER NET SALE','Base Amount']
             for col in numeric_cols:
                 if col in display_df.columns:
                     display_df[col] = display_df[col].apply(lambda x: format_currency(x) if pd.notna(x) else '-')
@@ -441,11 +453,122 @@ def render_tab(tab, key):
                 use_container_width=True
             )
 
-
 # Render tabs
 render_tab(tab1, "B2B")
 render_tab(tab2, "B2C")
 render_tab(tab3, "Combined")
+
+# ---------------- INVOICE QTY REPORT ----------------
+
+with tab4:
+    st.markdown("### 🧾 Invoice Qty Report")
+    st.info("Upload Invoice file and Promo CN file to generate report")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        invoice_file = st.file_uploader(
+            "Upload Invoice Excel File",
+            type=['xlsx', 'xls'],
+            key="invoice_qty_file"
+        )
+
+    with col2:
+        promo_file_invoice = st.file_uploader(
+            "Upload Promo CN File",
+            type=['xlsx', 'xls'],
+            key="invoice_promo_file"
+        )
+    
+    handling_rate = st.number_input(
+        "Enter Handling Charges (₹ per Qty)",
+        min_value=0.0,
+        value=270.0,
+        step=10.0
+    )
+
+    if st.button("🔄 Generate Invoice Qty Report", type="primary", use_container_width=True):
+        if invoice_file is not None and promo_file_invoice is not None:
+            try:
+                df_invoice = pd.read_excel(invoice_file)
+                df_invoice.columns = df_invoice.columns.str.strip()
+
+                promo_df = pd.read_excel(promo_file_invoice)
+                promo_df.columns = promo_df.columns.str.strip()
+                
+                # ---- STEP 1: BASIC PIVOT ----
+                pivot_invoice = pd.pivot_table(
+                    df_invoice,
+                    index="Material_Cd",
+                    values=["Qty", "Total_Val"],
+                    aggfunc="sum",
+                    fill_value=0,
+                    margins=True,
+                    margins_name="Grand Total"
+                ).reset_index()
+                
+                df_invoice=pivot_invoice.copy()
+
+                # ---- CREATE CONSUMER PROMO (VLOOKUP Equivalent) ----
+                # Excel: VLOOKUP(Material_Code, D:L, 9, 0)
+                # Means:
+                # Lookup value = Material_Code
+                # Lookup column = Column D in promo file
+                # Return column = 9th column from D (D=1 → L=9)
+
+                lookup_column = promo_df.columns[3]   # Column D
+                return_column = promo_df.columns[11]  # Column L (D to L = 9th column)
+
+                promo_map = promo_df.set_index(lookup_column)[return_column]
+
+                df_invoice["Consumer Promo"] = df_invoice["Material_Cd"].map(promo_map)
+                
+                # ---------- CALCULATIONS ----------
+
+                # Total Amount
+                df_invoice["Total Amount"] = df_invoice["Consumer Promo"].fillna(0) * df_invoice["Qty"]
+
+                # 1% CN
+                df_invoice["1% CN"] = df_invoice["Total Amount"] * 0.01
+
+                # Without GST (CN Base)
+                df_invoice["Without GST (CN Base)"] = df_invoice["1% CN"] / 1.18
+
+                # Wt Handling
+                df_invoice["Wt Handling"] = handling_rate * df_invoice["Qty"]
+
+                # Without GST per Handling
+                df_invoice["Without GST per Handling"] = df_invoice["Wt Handling"] / 1.18
+
+                # Total (1% CN + Wt Handling)
+                df_invoice["Total"] = df_invoice["1% CN"] + df_invoice["Wt Handling"]
+
+                # Total Base
+                df_invoice["Total Base"] = df_invoice["Total"] / 1.18
+
+                
+                desired_order = ["Material_Cd", "Qty", "Total_Val", "Consumer Promo", "Total Amount", "1% CN", "Without GST (CN Base)", "Wt Handling", "Without GST per Handling", "Total", "Total Base"]
+                df_invoice = df_invoice[desired_order]
+
+                st.success("✅ Invoice Qty Report Generated Successfully!")
+
+                st.markdown("### 📊 Pivot Table")
+                st.dataframe(df_invoice, use_container_width=True, height=400)
+
+                csv = convert_df_to_csv(df_invoice)
+                st.download_button(
+                    label="📥 Download Invoice Qty Report",
+                    data=csv,
+                    file_name="invoice_qty_report.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+            except Exception as e:
+                st.error(f"Error processing file: {str(e)}")
+        else:
+            st.warning("⚠️ Please upload both Invoice file and Promo CN file.")
+
 
 # Footer with instructions
 st.markdown("---")
